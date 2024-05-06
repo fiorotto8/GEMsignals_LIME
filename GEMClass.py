@@ -4,6 +4,8 @@ import numpy as np
 import ROOT
 import re
 from tqdm import tqdm
+from scipy.signal import butter, filtfilt, savgol_filter
+from scipy.ndimage import gaussian_filter
 
 def get_files_in_folder(folder_path):
     return [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
@@ -71,32 +73,124 @@ def graph(x,y,x_string, y_string,name=None, color=4, markerstyle=22, markersize=
         return plot
 def nparr(list):
     return np.array(list, dtype="d")
-
 class GEMwave:
-    def __init__(self, y,name,invert=False,dynRange=4096,ampGain=10):
-        self.name=name
-        if invert==False: self.y=(nparr(y)/ampGain)/dynRange
-        else:self.y=-1*(nparr(y)/ampGain)/dynRange
-        self.scopeImpedence = 50#ohm
-        self.samples=len(self.y)
-        self.dt=self.dtdefinition()
-        self.x=np.linspace(0,(self.samples-1)*self.dt,self.samples)
+    def __init__(self, y, name, invert=False, dynRange=4096, ampGain=10):
+        # Constructor to initialize the GEMwave object.
+        self.name = name  # Name of the waveform.
+        # Invert the waveform if requested. Normalize by amplification gain and dynamic range.
+        if not invert:
+            self.y = (np.array(y) / ampGain) / dynRange
+        else:
+            self.y = -1 * (np.array(y) / ampGain) / dynRange
+        self.scopeImpedence = 50  # Ohm, impedance of the oscilloscope used.
 
-    def GetChargeIntegral(self,range=[0.25E-6,0.5E-6]):
+        # Adjust voltage for 50 ohm input impedance of the oscilloscope
+        self.y = self.y * (50 + self.scopeImpedence) / 50
+
+        self.samples = len(self.y)  # Total number of samples in the waveform.
+        self.dt = self.dtdefinition()  # Determine the time interval between samples.
+        # Create an x-axis time vector from 0 to the total time span of the samples.
+        self.x = np.linspace(0, (self.samples - 1) * self.dt, self.samples)
+
+#### SET OF FILTERS
+    def ApplyBandPassFilter(self, lowcut=100E6, highcut=300E6, order=10):
+        # Convert the cutoff frequencies to normalized form
+        nyquist = 0.5 / self.dt  # Nyquist frequency
+        low = lowcut / nyquist
+        high = highcut / nyquist
+        # Create bandpass Butterworth filter
+        b, a = butter(order, [low, high], btype='band')
+        # Apply the filter
+        self.y = filtfilt(b, a, self.y)
+
+    def ApplyLowPassFilter(self, cutoff=2E8, order=5):
+        # Calculate Nyquist frequency
+        nyquist = 0.5 / self.dt
+        # Check if the cutoff frequency is too high
+        if cutoff >= nyquist:
+            raise ValueError("Cutoff frequency must be less than half the sampling rate (Nyquist frequency).")
+        # Calculate normalized cutoff frequency
+        normal_cutoff = cutoff / nyquist
+        # Generate low-pass Butterworth filter coefficients
+        from scipy.signal import butter, filtfilt
+        b, a = butter(order, normal_cutoff, btype='low', analog=False)
+        # Apply the filter to self.y using filtfilt to avoid phase shift
+        self.y = filtfilt(b, a, self.y)
+
+    def ApplyGaussianFilter(self, sigma=5):
+        # Apply Gaussian filter with specified sigma
+        self.y = gaussian_filter(self.y, sigma=sigma)
+
+    def ApplyMovingAverage(self, window_size=20):
+        # Apply moving average filter with specified window size
+        if window_size % 2 == 0:
+            window_size += 1  # Ensure window size is odd
+        window = np.ones(window_size) / window_size
+        self.y = np.convolve(self.y, window, 'same')
+
+    def ApplySavGolFilter(self, window_length=51, polyorder=5):
+        # Apply the Savitzky-Golay filter to self.y and update it.
+        # Ensure window_length is odd and less than the number of samples.
+        if window_length % 2 == 0:
+            window_length += 1  # Make sure the window length is odd
+        if window_length > self.samples:
+            print("Window length must be less than number of samples.")
+            return
+        self.y = savgol_filter(self.y, window_length, polyorder)
+
+#### OTHER METHODS
+    def GetChargeIntegral(self, range=[0.25E-6, 0.5E-6]):
+        # Calculate the integral of the charge within a specified time range.
         sel_y = self.y[(self.x > range[0]) & (self.x < range[1])]
-        return (np.sum(sel_y)*self.dt)/self.scopeImpedence
+        return (np.sum(sel_y) * self.dt) / self.scopeImpedence
 
-    def GetTGraph(self,write=False):
-        return graph(self.x,self.y,"time(s)","voltage(V)",self.name,write=write)
+    def GetTGraph(self, write=False):
+        # Generate a graph of the waveform.
+        return graph(self.x, self.y, "time(s)", "voltage(V)", self.name, write=write)
 
     def dtdefinition(self):
-        if self.samples==1024: dt=1.33E-9#seconds
-        elif self.samples==4000: dt=4E-9#seconds
+        # Define the sampling interval based on the number of samples.
+        if self.samples == 1024:
+            dt = 1.33E-9  # seconds, specific for 1024 samples.
+        elif self.samples == 4000:
+            dt = 4E-9  # seconds, specific for 4000 samples.
         else:
-            print("Unkown sampling --> dt set to 0!")
-            dt=0
+            print("Unknown sampling --> dt set to 0!")
+            dt = 0
         return dt
 
-    def NoiseIntegral(self,range=[0,0.2E-6]):
+    def NoiseIntegral(self, range=[0, 0.2E-6]):
+        # Calculate the integral of the noise within a specified time range.
         sel_y = self.y[(self.x > range[0]) & (self.x < range[1])]
-        return (np.sum(sel_y)*self.dt)/self.scopeImpedence
+        return (np.sum(sel_y) * self.dt) / self.scopeImpedence
+
+    def GetFFT(self):
+        # Compute the FFT of self.y
+        fft_result = np.fft.fft(self.y)
+        # Compute the corresponding frequencies
+        freq = np.fft.fftfreq(self.samples, d=self.dt)
+        # Only take the half of the spectrum corresponding to positive frequencies
+        positive_freq_indices = freq > 0
+        freq = freq[positive_freq_indices]
+        fft_result = fft_result[positive_freq_indices]
+        # Calculate the power spectrum (magnitude squared)
+        power = np.abs(fft_result) ** 2
+        # Return the frequency and power
+        return freq, power
+
+    def ApplyIntegratorWithDecay(self, feedback_capacitance=1E-6, feedback_resistor=100):
+        """
+        Simulates a charge amplifier/integrator with a decay determined by the feedback components.
+        This version outputs the integrated charge directly.
+        Parameters:
+        - feedback_capacitance (float): Feedback capacitance in farads.
+        - feedback_resistor (float): Feedback resistor in ohms.
+        """
+        tau = feedback_resistor * feedback_capacitance  # Time constant
+        decay_factor = np.exp(-self.dt / tau)  # Calculate decay factor for each sample
+        accumulated_charge = np.zeros_like(self.y)  # Initialize accumulated charge array
+        # Perform integration with decay to accumulate charge
+        for i in range(1, len(self.y)):
+            accumulated_charge[i] = accumulated_charge[i - 1] * decay_factor + self.y[i] * self.dt
+
+        return accumulated_charge

@@ -1,3 +1,5 @@
 *.root
 *.csv
 readdf.py
+*.png
+__pycache__
