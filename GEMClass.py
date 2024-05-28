@@ -73,9 +73,80 @@ def graph(x,y,x_string, y_string,name=None, color=4, markerstyle=22, markersize=
         return plot
 def nparr(list):
     return np.array(list, dtype="d")
+
+# You can use this function to directly create all the GEMwave objects from the root files if needed!
+def process_gem_data(root_file):
+    gem_waves_obj = { "GEM1": [], "GEM2": [], "GEM3": [] }
+    for gem_id, waveforms in root_file.gem_data.items():
+        for i, y in enumerate(waveforms):
+            gem_wave = GEMwave(y, f"{gem_id}_wave_{i}")
+            gem_waves_obj[gem_id].append(gem_wave)
+            #print(f"Processed {gem_wave.name} with {gem_wave.samples} samples")
+    return gem_waves_obj
+
+class ROOTFile:
+    def __init__(self, path):
+        """
+        Constructor to initialize the ROOTFile object.
+
+        Parameters:
+        path (str): Path to the ROOT file.
+
+        It has one important attribute which is a dictionary:
+        - self.gem_data: A dictionary with keys "GEM1", "GEM2", "GEM3" containing the sampled voltages arrays
+                        for each respective GEM ID.
+        """
+        # Store the path to the ROOT file
+        self.path = path
+        # Extract the run number from the file path using regular expressions
+        self.run_num = re.search(r'\d+', path).group(0)
+        try:
+            # Open the ROOT file and access the GEM events tree
+            events_GEM = uproot.open(path + ":GEM_Events")
+        except Exception as e:
+            # Print an error message and exit if the file cannot be opened
+            print(f"Failed to open (maybe empty) {path}: {e}")
+            exit()
+        # Extract the sampled voltage data (waveforms) from the GEM events tree
+        allY = events_GEM["pmt_fullWaveform_Y"].array(library="np")
+        # Extract the GEM ID data from the GEM events tree
+        GEMid_temp = events_GEM["pmt_wf_channel"].array(library="np")
+        # Adjust GEM IDs by subtracting 4
+        adjusted_GEMID = GEMid_temp - 4
+        # Define the valid GEM IDs
+        valid_gem_ids = [1, 2, 3]
+        # Check if all elements in adjusted_GEMID are either 1, 2, or 3
+        invalid_gem_ids = ~np.isin(adjusted_GEMID, valid_gem_ids)
+        # If there are any invalid GEM IDs, print an error message and exit
+        if np.any(invalid_gem_ids):
+            print("Something wrong with the GEM number and the relative ADC channel")
+            exit()
+        # Create a dictionary to store the sampled voltage arrays for each GEM ID
+        self.gem_data = {"GEM1": [], "GEM2": [], "GEM3": []}
+        # Populate the dictionary with the corresponding allY arrays
+        for i, gem_id in enumerate(adjusted_GEMID):
+            if gem_id == 1:
+                self.gem_data["GEM1"].append(allY[i])
+            elif gem_id == 2:
+                self.gem_data["GEM2"].append(allY[i])
+            elif gem_id == 3:
+                self.gem_data["GEM3"].append(allY[i])
+        # Convert lists to numpy arrays for efficient processing
+        for key in self.gem_data:
+            self.gem_data[key] = np.array(self.gem_data[key])
+
 class GEMwave:
     def __init__(self, y, name, invert=False, dynRange=4096, ampGain=10):
-        # Constructor to initialize the GEMwave object.
+        """
+        Constructor to initialize the GEMwave object.
+
+        Parameters:
+        y (array): The sampled voltage array.
+        name (str): Name of the waveform.
+        invert (bool): Whether to invert the waveform. Default is False.
+        dynRange (int): Dynamic range for normalization. Default is 4096.
+        ampGain (int): Amplification gain for normalization. Default is 10.
+        """
         self.name = name  # Name of the waveform.
         # Invert the waveform if requested. Normalize by amplification gain and dynamic range.
         if not invert:
@@ -84,15 +155,17 @@ class GEMwave:
             self.y = -1 * (np.array(y) / ampGain) / dynRange
         self.scopeImpedence = 50  # Ohm, impedance of the oscilloscope used.
 
+        """ I'm really not sure about that....
         # Adjust voltage for 50 ohm input impedance of the oscilloscope
         self.y = self.y * (50 + self.scopeImpedence) / 50
+        """
 
         self.samples = len(self.y)  # Total number of samples in the waveform.
         self.dt = self.dtdefinition()  # Determine the time interval between samples.
         # Create an x-axis time vector from 0 to the total time span of the samples.
         self.x = np.linspace(0, (self.samples - 1) * self.dt, self.samples)
 
-#### SET OF FILTERS
+#### A BUNCH OF FILTERS
     def ApplyBandPassFilter(self, lowcut=100E6, highcut=300E6, order=10):
         # Convert the cutoff frequencies to normalized form
         nyquist = 0.5 / self.dt  # Nyquist frequency
@@ -182,6 +255,7 @@ class GEMwave:
         """
         Simulates a charge amplifier/integrator with a decay determined by the feedback components.
         This version outputs the integrated charge directly.
+        No gain implemented to get the full charge
         Parameters:
         - feedback_capacitance (float): Feedback capacitance in farads.
         - feedback_resistor (float): Feedback resistor in ohms.
